@@ -1,5 +1,5 @@
 
-name: KaosVerse - APK e EXE
+name: KaosVerse - APK e EXE corrigidos
 
 on:
   push:
@@ -15,51 +15,84 @@ permissions:
 
 jobs:
   compilar:
-    name: Gerar ${{ matrix.platform }}
+    name: Compilar ${{ matrix.plataforma }}
     runs-on: ubuntu-24.04
     timeout-minutes: 70
     strategy:
       fail-fast: false
       matrix:
-        platform: [windows, android]
+        plataforma: [windows, android]
 
     steps:
-      - name: Baixar arquivos
+      - name: Baixar repositorio
         uses: actions/checkout@v4
 
-      - name: Extrair KaosVerse
+      - name: Extrair e corrigir KaosVerse
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p projeto kit
+
           if [ -f KaosVerse_V21_Compilacao_APK_EXE_Celular.zip ]; then
             unzip -q KaosVerse_V21_Compilacao_APK_EXE_Celular.zip -d kit
             unzip -q kit/KaosVerse_V21_Studio_Explorer_Toolbox.zip -d projeto
           elif [ -f KaosVerse_V21_Studio_Explorer_Toolbox.zip ]; then
             unzip -q KaosVerse_V21_Studio_Explorer_Toolbox.zip -d projeto
           else
-            echo 'ZIP do projeto nao encontrado'
+            echo 'ERRO: ZIP do KaosVerse nao encontrado.'
             exit 1
           fi
+
           test -f projeto/KaosVerse_V21/project.godot
+          test -f projeto/KaosVerse_V21/export_presets.cfg
+
           python3 - <<'PY'
           from pathlib import Path
-          p = Path('projeto/KaosVerse_V21/export_presets.cfg')
-          s = p.read_text(encoding='utf-8')
+          import re
+
+          root = Path('projeto/KaosVerse_V21')
+          project = root / 'project.godot'
+          content = project.read_text(encoding='utf-8')
+          key = 'textures/vram_compression/import_etc2_astc'
+
+          if re.search(r'^' + re.escape(key) + r'\s*=', content, re.M):
+              content = re.sub(
+                  r'^' + re.escape(key) + r'\s*=.*$',
+                  key + '=true',
+                  content,
+                  flags=re.M
+              )
+          else:
+              assert '[rendering]' in content
+              content = content.replace(
+                  '[rendering]',
+                  '[rendering]\n' + key + '=true',
+                  1
+              )
+
+          project.write_text(content, encoding='utf-8')
+          assert key + '=true' in project.read_text(encoding='utf-8')
+
+          presets = root / 'export_presets.cfg'
+          s = presets.read_text(encoding='utf-8')
+
           if 'binary_format/embed_pck=true' not in s:
               s = s.replace(
                   '[preset.0.options]',
                   '[preset.0.options]\nbinary_format/embed_pck=true',
                   1
               )
-          p.write_text(s, encoding='utf-8')
+
+          presets.write_text(s, encoding='utf-8')
+          print('ETC2/ASTC ativado.')
           PY
 
       - name: Instalar Godot 4.7.2
         shell: bash
         run: |
           set -euo pipefail
-          BASE=https://github.com/godotengine/godot-builds/releases/download/4.7.2-stable
+
+          BASE='https://github.com/godotengine/godot-builds/releases/download/4.7.2-stable'
 
           curl -fL --retry 4 \
             "$BASE/Godot_v4.7.2-stable_linux.x86_64.zip" \
@@ -76,9 +109,9 @@ jobs:
             -o /tmp/templates.tpz
 
           mkdir -p /tmp/godot-templates
-          unzip -q /tmp/templates.tpz -d /tmp/godot-templates
-
           mkdir -p "$HOME/.local/share/godot/export_templates/4.7.2.stable"
+
+          unzip -q /tmp/templates.tpz -d /tmp/godot-templates
 
           cp -a /tmp/godot-templates/templates/. \
             "$HOME/.local/share/godot/export_templates/4.7.2.stable/"
@@ -86,27 +119,29 @@ jobs:
           godot --version
 
       - name: Instalar Java
-        if: matrix.platform == 'android'
+        if: matrix.plataforma == 'android'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Configurar Android SDK
-        if: matrix.platform == 'android'
+      - name: Preparar Android SDK
+        if: matrix.plataforma == 'android'
         uses: android-actions/setup-android@v4
         with:
           packages: 'platform-tools'
 
-      - name: Preparar assinatura Android
-        if: matrix.platform == 'android'
+      - name: Configurar Android
+        if: matrix.plataforma == 'android'
         shell: bash
         run: |
           set -euo pipefail
-          sdkmanager --install 'build-tools;35.0.1' 'platforms;android-35'
+
+          sdkmanager --install \
+            'build-tools;35.0.1' \
+            'platforms;android-35'
 
           SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
-
           test -d "$SDK/build-tools"
 
           mkdir -p "$HOME/.config/godot" "$HOME/.android"
@@ -135,86 +170,101 @@ jobs:
       - name: Importar recursos
         shell: bash
         run: |
+          set -euo pipefail
           godot --headless \
             --path projeto/KaosVerse_V21 \
             --editor --import --quit
 
-      - name: Criar EXE
-        if: matrix.platform == 'windows'
+      - name: Criar KaosVerse EXE
+        if: matrix.plataforma == 'windows'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p build
+
           godot --headless \
             --path projeto/KaosVerse_V21 \
             --export-release 'Windows Desktop' \
             "$GITHUB_WORKSPACE/build/KaosVerse.exe"
-          test -s build/KaosVerse.exe
-          python3 -c "assert open('build/KaosVerse.exe','rb').read(2) == b'MZ'"
 
-      - name: Criar APK
-        if: matrix.platform == 'android'
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('build/KaosVerse.exe')
+          assert p.stat().st_size > 1000000
+          assert p.read_bytes()[:2] == b'MZ'
+          print('EXE criado com sucesso.')
+          PY
+
+      - name: Criar KaosVerse APK
+        if: matrix.plataforma == 'android'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p build
+
           godot --headless \
             --path projeto/KaosVerse_V21 \
             --export-debug 'Android' \
             "$GITHUB_WORKSPACE/build/KaosVerse.apk"
-          test -s build/KaosVerse.apk
+
           python3 - <<'PY'
+          from pathlib import Path
           from zipfile import ZipFile
-          with ZipFile('build/KaosVerse.apk') as z:
+
+          p = Path('build/KaosVerse.apk')
+          assert p.stat().st_size > 1000000
+
+          with ZipFile(p) as z:
               assert 'AndroidManifest.xml' in z.namelist()
+
+          print('APK criado com sucesso.')
           PY
 
       - name: Salvar instalador
         uses: actions/upload-artifact@v4
         with:
-          name: KaosVerse-${{ matrix.platform }}
+          name: KaosVerse-${{ matrix.plataforma }}
           path: build/KaosVerse.*
           if-no-files-found: error
+          retention-days: 30
 
   publicar:
-    name: Publicar APK e EXE
+    name: Publicar arquivos compilados
     needs: compilar
+    if: always()
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Baixar instaladores
+      - name: Baixar arquivos
         uses: actions/download-artifact@v4
         with:
           pattern: KaosVerse-*
-          path: dist
+          path: downloads
           merge-multiple: true
 
-      - name: Verificar arquivos
-        shell: bash
-        run: |
-          test -s dist/KaosVerse.apk
-          test -s dist/KaosVerse.exe
-          ls -lh dist/
-
-      - name: Publicar downloads
-        shell: bash
+      - name: Publicar APK e EXE
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
+        shell: bash
         run: |
           set -euo pipefail
-          TAG=v0.21-teste
 
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" \
-              --title 'KaosVerse V21 - Teste' \
-              --notes 'APK e EXE experimentais.' \
-              --prerelease \
-              --target "$GITHUB_SHA"
+          mapfile -t arquivos < <(
+            find downloads -maxdepth 1 -type f \
+              \( -name '*.apk' -o -name '*.exe' \) | sort
+          )
+
+          if [ "${#arquivos[@]}" -eq 0 ]; then
+            echo 'Nenhum arquivo foi compilado.'
+            exit 1
           fi
 
-          gh release upload "$TAG" \
-            dist/KaosVerse.apk \
-            dist/KaosVerse.exe \
-            --clobber
+          TAG="v0.21-build-${GITHUB_RUN_NUMBER}"
+
+          gh release create "$TAG" "${arquivos[@]}" \
+            --title "KaosVerse V21 - Teste ${GITHUB_RUN_NUMBER}" \
+            --notes 'Versao experimental para testes. APK nao destinado a Google Play.' \
+            --target "$GITHUB_SHA" \
+            --prerelease
             
